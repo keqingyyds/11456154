@@ -1,0 +1,189 @@
+name: Build Weapon Avatar Fix
+
+on:
+  # 推送代码时触发
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - 'src/**'
+      - '.github/workflows/*'
+  
+  # 创建 Pull Request 时触发
+  pull_request:
+    branches: [ main, master ]
+  
+  # 手动触发工作流
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Enable debug build'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  # 构建产物名称
+  ARTIFACT_NAME: weapon_avatar_fix
+  # 源文件路径
+  SOURCE_FILE: src/weapon_avatar_fix.c
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]  # 可以添加 ubuntu-20.04, ubuntu-22.04
+        compiler: [gcc, clang]
+        build_type: [release]  # 可以添加 debug
+    
+    steps:
+      # 1. 检出代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      # 2. 显示系统信息
+      - name: System information
+        run: |
+          uname -a
+          cat /etc/os-release
+          gcc --version || true
+          clang --version || true
+          
+      # 3. 安装依赖（如果需要）
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-multilib
+          
+      # 4. 设置编译参数
+      - name: Set build options
+        id: build_opts
+        run: |
+          if [ "${{ matrix.build_type }}" = "debug" ] || [ "${{ github.event.inputs.debug }}" = "true" ]; then
+            echo "CFLAGS=-g -O0 -Wall -Wextra -fPIC -DDEBUG" >> $GITHUB_ENV
+            echo "BUILD_SUFFIX=-debug" >> $GITHUB_ENV
+          else
+            echo "CFLAGS=-O2 -Wall -Wextra -fPIC" >> $GITHUB_ENV
+            echo "BUILD_SUFFIX=" >> $GITHUB_ENV
+          fi
+          
+      # 5. 编译共享库
+      - name: Build shared library
+        run: |
+          mkdir -p build
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            CC=clang
+          else
+            CC=gcc
+          fi
+          
+          echo "Using compiler: $CC"
+          $CC -shared ${{ env.CFLAGS }} -o build/libweapon_avatar_fix${{ env.BUILD_SUFFIX }}.so ${{ env.SOURCE_FILE }} -ldl
+          
+          # 显示编译结果
+          ls -la build/
+          file build/*.so
+          
+      # 6. 验证编译产物
+      - name: Verify shared library
+        run: |
+          # 检查是否是有效的共享库
+          file build/libweapon_avatar_fix*.so | grep "ELF.*shared object"
+          # 检查符号表
+          nm -D build/libweapon_avatar_fix*.so | grep -E "(wa_init|wa_hook)" || true
+          # 查看库信息
+          readelf -h build/libweapon_avatar_fix*.so || true
+          
+      # 7. 创建版本信息
+      - name: Create version info
+        run: |
+          echo "Build Date: $(date)" > build/version.txt
+          echo "Commit: ${{ github.sha }}" >> build/version.txt
+          echo "Branch: ${{ github.ref_name }}" >> build/version.txt
+          echo "Compiler: ${{ matrix.compiler }}" >> build/version.txt
+          echo "Build Type: ${{ matrix.build_type }}" >> build/version.txt
+          echo "Build OS: ${{ matrix.os }}" >> build/version.txt
+          cat build/version.txt
+          
+      # 8. 上传构建产物（作为 Artifact）
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ matrix.compiler }}-${{ matrix.os }}${{ env.BUILD_SUFFIX }}
+          path: |
+            build/libweapon_avatar_fix*.so
+            build/version.txt
+          retention-days: 30
+          compression-level: 6
+
+  # 创建 Release 发布
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    # 只在推送 tag 时触发
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: List artifacts
+        run: |
+          ls -la artifacts/
+          find artifacts/ -name "*.so" -exec file {} \;
+          
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: artifacts/**/*.so
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 可选：自动构建多个架构
+  build-multiarch:
+    name: Build for multiple architectures
+    runs-on: ubuntu-latest
+    if: github.event.inputs.debug == 'true'  # 仅在手动触发时运行
+    strategy:
+      matrix:
+        arch: [x86_64, i386]  # DNF 服务端通常是 i386
+        
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Install multilib
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+          
+      - name: Build for ${{ matrix.arch }}
+        run: |
+          mkdir -p build-${{ matrix.arch }}
+          if [ "${{ matrix.arch }}" = "i386" ]; then
+            CFLAGS="-m32 -O2 -Wall -Wextra -fPIC"
+          else
+            CFLAGS="-m64 -O2 -Wall -Wextra -fPIC"
+          fi
+          
+          gcc -shared $CFLAGS -o build-${{ matrix.arch }}/libweapon_avatar_fix-${{ matrix.arch }}.so ${{ env.SOURCE_FILE }} -ldl
+          
+      - name: Upload multiarch artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weapon_avatar_fix-${{ matrix.arch }}
+          path: build-${{ matrix.arch }}/libweapon_avatar_fix-*.so
+          retention-days: 30
